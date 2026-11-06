@@ -1,0 +1,733 @@
+from __future__ import annotations
+
+import pathlib
+from typing import Literal
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from pandas.errors import EmptyDataError
+from plotly.graph_objects import Figure
+from plotly.subplots import make_subplots
+
+plotly_colors = [
+    "red",
+    "blue",
+    "green",
+    "orange",
+    "purple",
+    "brown",
+    "pink",
+    "gray",
+    "olive",
+    "cyan",
+]
+plotly_lines = ["solid", "dash", "dot", "dashdot"]
+
+
+def export_figure(
+    fig: Figure,
+    export_path: pathlib.Path,
+    default_filename: str,
+) -> None:
+    """Exports a given figure to a specified path.
+    The function checks the file extension of the export path and saves the
+    figure accordingly. If the path is a directory, it saves the figure with
+    the specified default filename in that directory. If the path contains a
+    file, it saves the figure with the specified extension if supported or
+    prints an error message if the extension is not recognized.
+
+    Args:
+        fig (plotly.graph_objs.Figure): The figure to be exported.
+        export_path (pathlib.Path): The path where the figure should be saved.
+        default_filename (str): The default filename to fall back to if the
+          path is a directory or if the file extension is not recognized.
+    """
+    # Export the plot as the suffix or as "episode_log.html"
+    suffix = export_path.suffix
+    if suffix == ".html":
+        fig.write_html(export_path)
+    elif suffix in [".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf"]:
+        fig.write_image(export_path)
+    elif export_path.is_dir():
+        fig.write_html(export_path / default_filename)
+    else:
+        if not (export_path.parent / default_filename).exists():
+            print(
+                "File path suffix is not known nor is the file path a directory. "
+                f"Saving to {export_path.parent / default_filename}"
+            )
+            fig.write_html(export_path.parent / default_filename)
+        else:
+            print(
+                "File path suffix is not know nor is the file path a "
+                "directory. Not saving."
+            )
+
+
+def plot_episode_log(
+    result_folders: dict[str, pathlib.Path],
+    window: int = 5,
+    window_size: tuple[int, int] | Literal["auto"] = "auto",
+    cut_off_point: int = np.iinfo(int).max,
+    show_validation: bool = False,
+) -> Figure:
+    """Plot one or multiple episodes to check out the training progress.
+
+    This function can already be called once the first results are in the
+    episode log file, to check out progress during training. But, in general,
+    this function is normally used to compare different runs to see
+    differences in the learning progress. In general all values are plotted
+    over the total number of steps taken during the training. The following
+    variables are shown:
+
+    1. Episode reward - Best used to see if the training is progressing
+    2. Steps per Episode - Here you can see if the number of steps to solve
+       the environment decreases over time.
+    3. Mean step reward - The higher the better each action actually is.
+       (Calculated value episode_reward/steps_per_episode)
+    4. Episode End Reason - For each run multiple lines to show why the
+       episode was terminated. !ATTENTION! the window here is 100 to calculate a
+       crude percentage.
+    5. Seconds per Step - Time each step took to compute. Should not have much
+       variation in general. But use case specific can have differences.
+    6. Wall time - How much time did elapse to this time step. (Integral of
+       previous plot).
+
+
+    To check out the training I like to look at all the plots at once to see if
+    there is anything that should concern me. For publishing most values have
+    no informational gain so feel free to adapt (Remove certain sub plot, etc)
+    the function.
+
+    Author: Clemens Fricke (clemens.david.fricke@tuwien.ac.at)
+
+    Args:
+        result_folders (dict[str, pathlib.Path]): Dict of name and path to each
+          experiment to visualize.
+        window (int, optional): Windowing is used to smooth the plots.
+          Defaults to 5.
+        window_size (Union[tuple[int, int], Literal['auto']], optional): Size
+         of the figure used. For html 'auto' will adapt the size to the browser
+         or container size. Defaults to "auto".
+        cut_off_point (int, optional): Plot the episode only to a certain
+         number of time steps. Defaults to max int.
+        show_validation (bool, optional): Whether to show validation results.
+         Defaults to False.
+
+    Returns:
+        fig (plotly.graph_objects.Figure): Plotly figure object with the
+         requested plots for further customization or export.
+    """
+    end_episode = []
+    df: list[pd.DataFrame] = []
+    df_val: list[pd.DataFrame] = []
+    # make a separate list for just the names of the experiments
+    n_env: list[str] = list(result_folders.keys())
+    # set of all episode end reasons
+    unique_values = set()
+    for idx, folder in enumerate(result_folders.values()):
+        try:
+            temp_df = pd.read_csv(folder / "episode_log.csv", index_col=0)
+        except EmptyDataError as err:
+            print(
+                f"Error occurred with data in folder {folder}. The error is {err}"
+            )
+            continue
+        end_episode.append(
+            (temp_df.loc[temp_df["total_timesteps"] < cut_off_point].index)[-1]
+        )
+        row = pd.to_datetime(temp_df["wall_time"])
+        temp_df["wall_time"] = row
+        temp_df["run_time"] = row - row.iloc[0]
+        temp_df["time_delta"] = row - row.shift()
+        temp_df["mean_step_reward"] = (
+            temp_df["episode_reward"] / temp_df["steps_in_episode"]
+        )
+        unique_values.update(temp_df["episode_end_reason"].unique())
+
+        # Validation
+        if (
+            show_validation
+            and (val_file := folder / "eval/log/evaluations.npz").exists()
+        ):
+            val_data = np.load(val_file)
+            data = {}
+            data["total_timesteps"] = val_data["timesteps"][
+                val_data["timesteps"] <= cut_off_point
+            ]
+            cut_off = len(data["total_timesteps"])
+            data["val_reward_mean"] = val_data["results"][:cut_off].mean(
+                axis=1
+            )
+            data["val_reward_min"] = val_data["results"][:cut_off].min(axis=1)
+            data["val_reward_max"] = val_data["results"][:cut_off].max(axis=1)
+            data["val_length_mean"] = val_data["ep_lengths"][:cut_off].mean(
+                axis=1
+            )
+            data["val_length_min"] = val_data["ep_lengths"][:cut_off].min(
+                axis=1
+            )
+            data["val_length_max"] = val_data["ep_lengths"][:cut_off].max(
+                axis=1
+            )
+
+            temp_val = pd.DataFrame(data, index=data["total_timesteps"])
+        else:
+            temp_val = None
+        df_val.append(temp_val)
+        df.append(temp_df)
+
+    fig = make_subplots(
+        rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.01
+    )
+    # plot each experiment into each sub plot, the idx is used to determine the
+    # episode end and the episode name
+    for idx, (dataframe, val_dataframe) in enumerate(zip(df, df_val)):
+        # first subplot
+        fig.add_trace(
+            go.Scatter(
+                x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                y=dataframe["episode_reward"]
+                .iloc[: end_episode[idx]]
+                .rolling(window, window)
+                .mean(),
+                mode="lines",
+                legendgroup=f"{n_env[idx]}",  # Used so that each experiment can be disabled
+                name=f"{n_env[idx]}",  # name the legend item
+                line={"color": plotly_colors[idx]},
+                showlegend=True,  # show legend only for first subplot
+                customdata=dataframe.index,
+                hovertemplate="(%{x:d},%{y:.2f}) Episode: %{customdata:d}",
+            ),
+            row=1,
+            col=1,
+        )
+        if val_dataframe is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=val_dataframe["total_timesteps"],
+                    y=val_dataframe["val_reward_mean"],
+                    legendgroup=f"{n_env[idx]}",
+                    name=f"Validation {n_env[idx]}",
+                    # line_color=plotly_colors[idx],
+                    mode="markers",
+                    showlegend=True,
+                    opacity=0.2,
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": val_dataframe["val_reward_max"]
+                        - val_dataframe["val_reward_mean"],
+                        "arrayminus": val_dataframe["val_reward_mean"]
+                        - val_dataframe["val_reward_min"],
+                    },
+                    marker={"color": plotly_colors[idx], "size": 8},
+                ),
+                row=1,
+                col=1,
+            )
+        # second subplot
+        fig.add_trace(
+            go.Scatter(
+                x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                y=dataframe["steps_in_episode"]
+                .iloc[: end_episode[idx]]
+                .rolling(window, window)
+                .mean(),
+                mode="lines",
+                legendgroup=f"{n_env[idx]}",
+                name=f"{n_env[idx]}",
+                line={"color": plotly_colors[idx]},
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
+
+        if val_dataframe is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=val_dataframe["total_timesteps"],
+                    y=val_dataframe["val_length_mean"],
+                    legendgroup=f"{n_env[idx]}",
+                    name=f"Validation {n_env[idx]}",
+                    mode="markers",
+                    showlegend=False,
+                    opacity=0.2,
+                    error_y={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": val_dataframe["val_length_max"]
+                        - val_dataframe["val_length_mean"],
+                        "arrayminus": val_dataframe["val_length_mean"]
+                        - val_dataframe["val_length_min"],
+                    },
+                    marker={"color": plotly_colors[idx], "size": 8},
+                ),
+                row=2,
+                col=1,
+            )
+        # third subplot
+        fig.add_trace(
+            go.Scatter(
+                x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                y=dataframe["mean_step_reward"]
+                .iloc[: end_episode[idx]]
+                .rolling(window, window)
+                .mean(),
+                mode="lines",
+                legendgroup=f"{n_env[idx]}",
+                name=f"{n_env[idx]}",
+                line={"color": plotly_colors[idx]},
+                showlegend=False,
+            ),
+            row=3,
+            col=1,
+        )
+        # fourth subplot - episode end reason iterate through all reasons
+        # legend for this plot is created at the end
+        for marker, unique_key in zip(plotly_lines, unique_values):
+            fig.add_trace(
+                go.Scatter(
+                    x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                    # window is 100 to calculate a crude percentage approximation
+                    y=(dataframe["episode_end_reason"] == unique_key)
+                    .iloc[: end_episode[idx]]
+                    .rolling(100, 0)
+                    .mean(),
+                    line={
+                        "color": plotly_colors[idx],
+                        "dash": marker,
+                        "width": 4,
+                    },
+                    legendgroup=f"{n_env[idx]}",
+                    name=f"{unique_key}: {n_env[idx]}",
+                    showlegend=False,
+                ),
+                row=4,
+                col=1,
+            )
+        # fith subplot
+        fig.add_trace(
+            go.Scatter(
+                x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                y=dataframe["time_delta"]
+                .iloc[: end_episode[idx]]
+                .dt.total_seconds()
+                / dataframe["steps_in_episode"].iloc[: end_episode[idx]],
+                mode="lines",
+                legendgroup=f"{n_env[idx]}",
+                name=f"{n_env[idx]}",
+                line={"color": plotly_colors[idx]},
+                showlegend=False,
+            ),
+            row=5,
+            col=1,
+        )
+        # sixth subplot
+        fig.add_trace(
+            go.Scatter(
+                x=dataframe["total_timesteps"].iloc[: end_episode[idx]],
+                y=dataframe["run_time"]
+                .iloc[: end_episode[idx]]
+                .dt.total_seconds()
+                / 3600.0,
+                mode="lines",
+                legendgroup=f"{n_env[idx]}",
+                name=f"{n_env[idx]}",
+                line={"color": plotly_colors[idx]},
+                showlegend=False,
+            ),
+            row=6,
+            col=1,
+        )
+
+    # create end reason legend
+    for marker, unique_key in zip(plotly_lines, unique_values):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                legendgroup="end_reason",
+                legendgrouptitle={"text": "Episode End Reasons"},
+                name=f"{unique_key}",
+                line={
+                    "color": "black",
+                    "dash": marker,
+                    "width": 4,
+                },
+                mode="lines",
+                showlegend=True,
+            ),
+            row=4,
+            col=1,
+        )
+
+    # adapt figure size
+    fig.update_traces(line={"width": 0.6})
+    if not isinstance(window_size, list) and window_size == "auto":
+        fig.update_layout(autosize=True)
+    else:
+        fig.update_layout(height=window_size[0], width=window_size[1])
+    # update axis labels
+    fig.update_xaxes(title_text="Total time steps", row=6, col=1)
+    fig.update_yaxes(title_text="Episode reward", row=1, col=1)
+    fig.update_yaxes(title_text="Steps<br>per episode", row=2, col=1)
+    fig.update_yaxes(title_text="Mean step<br>reward", row=3, col=1)
+    fig.update_yaxes(title_text="Episode<br>end reason", row=4, col=1)
+    fig.update_yaxes(title_text="Seconds<br>per step [s]", row=5, col=1)
+    fig.update_yaxes(title_text="Wall time [h]", row=6, col=1)
+
+    return fig
+
+
+def get_data_from_dataframe(
+    df: pd.DataFrame,
+    name: str,
+    selector: list[tuple[str, tuple[int, int]]],
+) -> pd.DataFrame:
+    """Get data from a dataframe based on the provided selector.
+
+    This function extracts specific data from a given dataframe based on the
+    provided selector. The selector is a list of tuples, where each tuple
+    contains a string and a tuple of two integers. The string indicates the
+    type of data to extract (e.g., "obs", "info"), and the tuple of integers
+    specifies the range of indices to extract. The function returns a new
+    dataframe containing the extracted data.
+    The function is designed to handle different types of data extraction,
+    including observations and information from the dataframe. It uses
+    recursion to navigate through the dataframe structure (and subsequent dict)
+    and extract the desired data.
+
+    Example:
+        with the selector [("obs", (0, 2)), ("infos.geometry_information", (3, 6))]
+        the function will extract the first two observation values and the
+        geometry information values (which are part of the info field) from index 3
+        to 5 (6 is exclusive).
+
+    Args:
+        df (pd.DataFrame): StepDataFrame containing the data to be extracted.
+        name (str): Name of field the extracted data should be stored in.
+        selector (list[tuple[str, tuple[int, int]]]): List of tuples
+          containing the type of data to extract and the range of indices.
+
+    Returns:
+        pd.DataFrame: DataFrame containing the extracted data.
+    """
+
+    def get_elem_from_crums(df: pd.DataFrame, crums: list[str]) -> np.ndarray:
+        """Get the element from the dataframe/dictionary based on the crums."""
+        if len(crums) == 1:
+            return df.apply(lambda x: x[crums[0]])
+        else:
+            return get_elem_from_crums(
+                df.apply(lambda x: x[crums[0]]), crums[1:]
+            )
+
+    objective_id = 0
+    ret_df = []
+    for element in selector:
+        if element[0] == "obs":
+            selected = np.vstack(df["obs"].values).T[
+                element[1][0] : element[1][1]
+            ]
+            ret_df.append(
+                pd.DataFrame(
+                    selected.T,
+                    columns=[
+                        f"{name}_{objective_id + i}"
+                        for i in range(len(selected))
+                    ],
+                )
+            )
+            objective_id += len(selected)
+        elif element[0].startswith("infos"):
+            if element[0].endswith("geometry_information"):
+                selected = np.vstack(
+                    df["infos"].apply(
+                        lambda x: np.array(x["geometry_information"]).flatten()
+                    )
+                ).T[element[1][0] : element[1][1]]
+            else:
+                crums = element[0].split(".")
+                selected = np.vstack(
+                    get_elem_from_crums(df["infos"], crums[1:])
+                ).T[element[1][0] : element[1][1]]
+            ret_df.append(
+                pd.DataFrame(
+                    selected.T,
+                    columns=[
+                        f"{name}_{objective_id + i}"
+                        for i in range(len(selected))
+                    ],
+                )
+            )
+            objective_id += len(selected)
+    return pd.concat(ret_df, axis=1)
+
+
+def plot_step_log(
+    step_log_file: pathlib.Path,
+    env_id: int,
+    episode_start: int = 0,
+    episode_end: int = np.iinfo(int).max,
+    episode_step: int = 1,
+    figure_size: tuple[int, int] | Literal["auto"] = "auto",
+    objective_observation: list[tuple[str, tuple[int, int]]] | None = None,
+    design_variable: list[tuple[str, tuple[int, int]]] | None = None,
+) -> Figure:
+    """Plot the step log data of a single run for multiple episodes.
+
+    This function is used to visualize the step log data of a single run
+    with the intention of understanding the training progression and the
+    policy that is learned by the agent.
+    It creates an interactive plot with two subplots:
+
+    1. The first subplot shows the reward and objective value(s) over the number
+       of timesteps within the current episode.
+    2. The second subplot shows the values of the design variables (observations)
+       over the number of timesteps within the current episode.
+       The plot is interactive, allowing users to select different episodes via a
+       slider to view the corresponding data.
+
+    Since plotly does not recompute data when the user interacts with the
+    plot, the data for all episodes is precomputed and stored in the figure.
+    This can result in large file sizes, especially when the optimization
+    contained a lot of design parameters and when the chosen episode range is
+    large. Please be aware of this when using the function.
+
+    For explanation of the parameters objective_observation and design_variable,
+    please refer to the documentation of the function `get_data_from_dataframe`.
+
+    Authors:
+        Daniel Wolff (d.wolff@unibw.de)
+        Clemens Fricke (clemens.david.fricke@tuwien.ac.at)
+
+    Args:
+        step_log_file (pathlib.Path): Path to the step log file.
+        env_id (int): ID of the environment whose results should be visualized.
+          This parameter is only relevant in the case of multi-environment
+          training. If the training did not use multiple environments, this
+          parameter should be set to 0.
+        episode_start (int, optional): First episode that should be included in
+          the visualization. Defaults to 0.
+        episode_end (int, optional): Last episode that should be included in
+          the visualization. If None, the maximum episode number is used.
+          Defaults to None.
+        episode_step (int, optional): Step size for selecting episodes.
+          Defaults to 1, which means that every episode between the starting
+          and final episode are visualized.
+        figure_size (Union[tuple[int, int], Literal['auto']], optional):
+          Size of the figure. If 'auto', the size will be adjusted to fit the
+          container. Defaults to 'auto'.
+        objective_observation (list[tuple[str, tuple[int, int]]]): List of
+          tuples containing information from which column of the steplog data
+          to extract the information about the objective (each row in a column
+          generally contains a list of values) and the indices which entries
+          from that list are supposed to be to extracted.
+        design_variable (list[tuple[str, tuple[int, int]]]): List of tuples
+          containing information from which column of the steplog data to
+          extract the information about the design variables (each row in a
+          column generally contains a list of values) and the indices which
+          entries from that list are supposed to be to extracted.
+    Returns:
+        plotly.graph_objects.Figure: A Plotly figure object containing the
+          interactive plot for further customization or export.
+    """
+    # defaults
+    if design_variable is None:
+        design_variable = [("obs", (1, None))]
+    if objective_observation is None:
+        objective_observation = [("obs", (0, 1))]
+    # ---------- Load data ----------
+    # Load the step log data from the provided path
+    try:
+        df_raw = pd.read_json(step_log_file, lines=True)
+    except RuntimeError as err:
+        print(
+            f"Error occurred when trying to read {step_log_file}. The error is {err}"
+        )
+        return
+
+    df_raw["episodes"] = df_raw["episodes"].apply(lambda x: x[env_id])
+    df_raw["reward"] = df_raw["rewards"].apply(lambda x: x[env_id])
+    df_raw["obs"] = df_raw["new_obs"].apply(lambda x: np.array(x[env_id]))
+
+    # Limitation: Unable to extract the reset values for each episode because the required
+    # "info" field is missing from the step log data. As a result, the "prev_obs" field
+    # only contains the last observation from the previous episode, not the reset value at
+    # the start of the current episode. This means that the initial state of each episode
+    # cannot be visualized, which may affect analyses that rely on episode initialization.
+    # Currently, there is no workaround unless the data collection process is updated to
+    # include the "info" field with reset values.
+
+    objectives = get_data_from_dataframe(
+        df_raw, "objective", objective_observation
+    )
+    design_vars = get_data_from_dataframe(
+        df_raw, "design_variable", design_variable
+    )
+
+    # combine everything into a single dataframe
+    df = pd.concat(
+        [df_raw["episodes"], df_raw["reward"], objectives, design_vars], axis=1
+    )
+    del df_raw  # free memory
+
+    if df.empty:
+        raise ValueError(
+            f"The provided step log file {step_log_file} is empty or does not follow the current format."
+        )
+
+    # ---------- Episode selection ----------
+    max_ep = df["episodes"].max()
+    if episode_end is None or episode_end > max_ep:
+        episode_end = max_ep
+
+    mask = (df["episodes"] >= episode_start) & (df["episodes"] <= episode_end)
+    if not mask.any():
+        raise IndexError(
+            f"Could not find any episode in the range {episode_start} to {episode_end}. "
+            f"The available episodes range from {df['episodes'].min()} to {df['episodes'].max()}"
+        )
+    selected_eps = df.loc[mask, "episodes"].unique()[::episode_step]
+    df = df[df["episodes"].isin(selected_eps)]
+    episodes = df["episodes"].unique()
+
+    # ---------- Identify trace columns ----------
+    obj_cols = [c for c in df.columns if c.startswith("objective_")]
+    var_cols = [c for c in df.columns if c.startswith("design_variable_")]
+
+    n_obj = len(obj_cols)
+
+    # total traces: objectives + reward + design vars
+    trace_order = []
+    trace_names = []
+    for idx, c in enumerate(obj_cols):
+        trace_order.append(("objective", c))
+        trace_names.append(f"Objective {idx}")
+    trace_order.append(("reward", "reward"))
+    trace_names.append("Reward")
+    for idx, c in enumerate(var_cols):
+        trace_order.append(("design_var", c))
+        trace_names.append(f"Design Var. {idx}")
+
+    # ---------- Precompute data per episode ----------
+    # per_episode is used to define the x/y data for each episode
+    per_episode_x = []
+    per_episode_y = []
+
+    for ep in episodes:
+        ep_df = df[df["episodes"] == ep]
+        steps = np.arange(len(ep_df))
+
+        xs = []
+        ys = []
+
+        # Objective traces
+        for c in obj_cols:
+            xs.append(steps.tolist())
+            ys.append(ep_df[c].tolist())
+
+        # Reward trace
+        xs.append(steps.tolist())
+        ys.append(ep_df["reward"].tolist())
+
+        # Design vars
+        for c in var_cols:
+            xs.append(steps.tolist())
+            ys.append(ep_df[c].tolist())
+
+        per_episode_x.append(xs)
+        per_episode_y.append(ys)
+
+    # ---------- Build figure with one trace per variable ----------
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        specs=[[{"secondary_y": True}], [{}]],
+        subplot_titles=("Reward and Objectives", "Design Variables"),
+        vertical_spacing=0.1,
+    )
+
+    # initial episode = first episode
+    first_x = per_episode_x[0]
+    first_y = per_episode_y[0]
+
+    # subplot mapping helper
+    def trace_location(idx):
+        if idx < n_obj:  # objective traces
+            return 1, 1, False
+        elif idx == n_obj:  # reward trace
+            return 1, 1, True
+        else:  # design variable traces
+            return 2, 1, False
+
+    # Add traces
+    for idx in range(trace_order):
+        row, col, sec = trace_location(idx)
+        fig.add_trace(
+            go.Scatter(
+                x=first_x[idx],
+                y=first_y[idx],
+                name=trace_names[idx],
+            ),
+            row=row,
+            col=col,
+            secondary_y=sec,
+        )
+
+    # ---------- Build slider steps (update x/y only) ----------
+    steps = []
+    for ep_idx, ep in enumerate(episodes):
+        steps.append({
+            "label": f"Episode {int(ep)}",
+            "method": "update",
+            "args": [
+                {
+                    "x": per_episode_x[ep_idx],
+                    "y": per_episode_y[ep_idx],
+                },
+                {"title": f"Steplog — Episode {int(ep)}"},
+            ],
+        })
+
+    fig.update_layout(
+        sliders=[
+            {
+                "active": 0,
+                "pad": {"t": 50},
+                "steps": steps,
+            }
+        ],
+        showlegend=True,
+    )
+    # The first subplot has two y-axes, so we need to assign the legend
+    # to only one of them to avoid duplicates. The second subplot
+    # has only one y-axis.
+    for i, yaxis in enumerate(list(fig.select_yaxes())[::2], 1):
+        legend_name = f"legend{i}"
+        fig.update_layout(
+            {legend_name: {"y": yaxis.domain[1], "yanchor": "top"}},
+            showlegend=True,
+        )
+        fig.update_traces(row=i, legend=legend_name)
+
+    # ---------- sizing ----------
+    if not isinstance(figure_size, (tuple, list)) and figure_size == "auto":
+        fig.update_layout(autosize=True)
+    elif isinstance(figure_size, (tuple, list)):
+        fig.update_layout(height=figure_size[0], width=figure_size[1])
+    else:
+        raise ValueError(
+            "figure_size must be 'auto' or a tuple of (height, width)"
+        )
+
+    # ---------- axes labels ----------
+    fig.update_yaxes(title_text="Objective", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Reward", row=1, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="Variable Value", row=2, col=1)
+
+    return fig

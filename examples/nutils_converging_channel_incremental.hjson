@@ -1,0 +1,73 @@
+{
+    "agent": {
+        "type": "PPO",
+        "policy": "MlpPolicy",
+        "tensorboard_log": "tensorboard"
+    },
+    "environment": {
+        "multi_processing": {
+            "number_of_cores": 4
+        },
+        "geometry": {
+            "shape_definition": {
+                "space_dimensions": [
+                    {
+                        "name": "phi",
+                        "number_of_points": 3,
+                        "degree": 2
+                    },
+                    {
+                        "name": "zeta",
+                        "number_of_points": 3,
+                        "degree": 2
+                    },
+                ],
+                // "control_points": [[0.0,0.0],[0.5,0.0],[1.0,0.0],[0.0,0.2],[0.5,0.2],[1.0,0.2],[0.0,0.4],[0.5,0.4],[1.0,0.4]]
+            },
+            "mesh": {
+                "path": "2DChannelTria.msh",
+                "dimensions": 2
+            },
+            "discrete_actions": true,
+        },
+        "spor": {
+            "steps": [
+                {
+                    "name": "nutils_solver",
+                    "stop_after_error": true,
+                    "reward_on_error": -10,
+                    "run_on_reset": true,
+                    "use_communication_interface": true,
+                    "working_directory": "./",
+                    "python_file_path": "poiseuille_flow_channel_shear_thinning.py",
+                    "add_step_information": true,
+                    "additional_observations": 3
+                }
+            ],
+            "reward_aggregation": "sum"
+        },
+        "max_timesteps_in_episode": 50
+    },
+    "number_of_timesteps": 250000,
+    "number_of_episodes": 100000,
+    "save_location": "training_releso_nutils_continuous_ppo_{}/",
+    "verbosity": {
+        "environment": "DEBUG",
+        "parser": "INFO"
+    },
+    "validation": {
+        "validation_freq": 3000,
+        "validation_values": [
+            1.95,
+            0.24,
+            0.12,
+            1.1,
+            0.7
+        ],
+        "save_best_agent": true,
+        "validate_on_training_end": true,
+        // "mesh_base_path_extension": "mesh/_.xns",
+        "max_timesteps_in_episode": 50,
+        "reward_on_episode_exceeds_max_timesteps": -5
+    }
+}
