@@ -17,7 +17,7 @@ classifiers = [
         "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "pydantic<2",
+    "pydantic<3",
     "torch>2.8",
     "stable-baselines3",
     "tensorboard",
